@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv
+env/
+venv/
+
+# Environment config — contains local paths, never commit
+.env
+
+# Model weights and engines — large binary files, store separately
+*.pt
+*.pth
+*.engine
+*.onnx
+*.wts
+
+# Training outputs — large, can be regenerated
+runs/
+
+# Generated outputs — not source code
+outputs/
+temp/
+
+# Dataset images and labels — store on Google Drive or separately
+data/images/
+data/labels/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Strategy/helper scripts — do not commit
+git-commit-strategy.sh
