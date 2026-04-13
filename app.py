@@ -7,8 +7,11 @@ import streamlit as st
 import cv2
 import tempfile
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from ultralytics import YOLO
+import torch
 import time
 
 
@@ -78,6 +81,13 @@ if filter_mode == "Detect Specific Objects Only":
 def load_model():
     """Load the pre-trained YOLOv8x model (cached for performance)."""
     with st.spinner("Loading YOLOv8x model... (this happens once)"):
+        # PyTorch 2.6+ defaults to weights_only=True, which can block older
+        # Ultralytics checkpoints unless trusted classes are allowlisted.
+        try:
+            from ultralytics.nn.tasks import DetectionModel
+            torch.serialization.add_safe_globals([DetectionModel])
+        except Exception:
+            pass
         model = YOLO('yolov8x.pt')  # Pre-trained on COCO dataset
     return model
 
@@ -106,16 +116,23 @@ def process_video(video_path, model, confidence, show_labels, show_fps, selected
 
     # Get video properties
     fps = int(cap.get(cv2.CAP_PROP_FPS))
+    if fps <= 0:
+        fps = 30
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Create temporary output file
+    # Create temporary output files
+    raw_output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
 
     # Video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+    out = cv2.VideoWriter(raw_output_path, fourcc, fps, (frame_width, frame_height))
+    if not out.isOpened():
+        cap.release()
+        st.error("Failed to initialize video writer")
+        return None
 
     # Progress tracking
     progress_bar = st.progress(0)
@@ -198,10 +215,53 @@ def process_video(video_path, model, confidence, show_labels, show_fps, selected
         cap.release()
         out.release()
 
+    if frame_count == 0 or not os.path.exists(raw_output_path) or os.path.getsize(raw_output_path) == 0:
+        if os.path.exists(raw_output_path):
+            os.unlink(raw_output_path)
+        if os.path.exists(output_path):
+            os.unlink(output_path)
+        st.error("No frames were written to output video")
+        return None
+
+    # Re-encode with H.264 for broad browser compatibility.
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            raw_output_path,
+            "-vcodec",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            output_path,
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            os.unlink(raw_output_path)
+            progress_bar.progress(1.0)
+            status_text.text(f"✅ Processing complete! Processed {frame_count} frames")
+            return output_path
+
+        # Fall back to raw OpenCV output if ffmpeg transcode fails.
+        st.warning("FFmpeg re-encode failed; using raw output format.")
+        if os.path.exists(output_path):
+            os.unlink(output_path)
+        progress_bar.progress(1.0)
+        status_text.text(f"✅ Processing complete! Processed {frame_count} frames")
+        return raw_output_path
+
+    # FFmpeg not installed: return raw output and warn user.
+    st.warning("FFmpeg not found. Install FFmpeg for better browser playback compatibility.")
+    if os.path.exists(output_path):
+        os.unlink(output_path)
     progress_bar.progress(1.0)
     status_text.text(f"✅ Processing complete! Processed {frame_count} frames")
-
-    return output_path
+    return raw_output_path
 
 
 # Main app
@@ -257,65 +317,73 @@ def main():
             "File Size": f"{uploaded_file.size / (1024*1024):.2f} MB"
         }
 
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 1], gap="large")
         with col1:
-            st.subheader("📹 Original Video")
-            # Display original video using stored path
-            st.video(st.session_state.temp_input_path)
+            with st.container(border=True):
+                st.subheader("📹 Original Video")
+                # Display original video using stored path
+                st.video(st.session_state.temp_input_path)
 
-            # Show file details
-            for key, value in file_details.items():
-                st.text(f"{key}: {value}")
+                info_col1, info_col2 = st.columns([2, 1])
+                with info_col1:
+                    st.caption(f"Filename: `{file_details['Filename']}`")
+                with info_col2:
+                    st.caption(f"Size: `{file_details['File Size']}`")
 
         with col2:
-            st.subheader("🎯 Detected Objects")
+            with st.container(border=True):
+                st.subheader("🎯 Detected Objects")
 
-            # Show filter info if active
-            if filter_mode == "Detect Specific Objects Only" and selected_classes:
-                st.info(f"🔍 Filtering for: {', '.join(selected_classes)}")
-            elif filter_mode == "Detect Specific Objects Only" and not selected_classes:
-                st.warning("⚠️ Please select at least one object class to detect")
-
-            # Process button
-            if st.button("🚀 Start Detection", type="primary", use_container_width=True):
-                with st.spinner("Processing video..."):
-                    # Prepare selected classes (None if detecting all)
-                    classes_to_detect = selected_classes if filter_mode == "Detect Specific Objects Only" else None
-
-                    output_path = process_video(
-                        st.session_state.temp_input_path,
-                        model,
-                        confidence_threshold,
-                        show_labels,
-                        show_fps,
-                        classes_to_detect
-                    )
-
-                    if output_path and os.path.exists(output_path):
-                        # Store the output path in session state (don't delete it yet)
-                        st.session_state.processed_video_path = output_path
-                        st.session_state.processed_filename = f"detected_{uploaded_file.name}"
+                # Display processed video first so it aligns with original player.
+                if 'processed_video_path' in st.session_state and st.session_state.processed_video_path:
+                    if os.path.exists(st.session_state.processed_video_path):
+                        st.video(st.session_state.processed_video_path)
                     else:
-                        st.error("Failed to process video")
-                        st.session_state.processed_video_path = None
+                        st.info("Processed video is no longer available. Please run detection again.")
+                else:
+                    st.info("Run detection to preview the annotated video here.")
 
-            # Display processed video if available
-            if 'processed_video_path' in st.session_state and st.session_state.processed_video_path:
-                if os.path.exists(st.session_state.processed_video_path):
-                    st.success("✅ Detection complete!")
-                    st.video(st.session_state.processed_video_path)
+                # Download button under player for consistent panel flow.
+                if 'processed_video_path' in st.session_state and st.session_state.processed_video_path:
+                    if os.path.exists(st.session_state.processed_video_path):
+                        with open(st.session_state.processed_video_path, 'rb') as f:
+                            st.download_button(
+                                label="⬇️ Download Annotated Video",
+                                data=f,
+                                file_name=st.session_state.processed_filename,
+                                mime="video/mp4",
+                                use_container_width=True
+                            )
 
-                    # Download button
-                    with open(st.session_state.processed_video_path, 'rb') as f:
-                        st.download_button(
-                            label="⬇️ Download Annotated Video",
-                            data=f,
-                            file_name=st.session_state.processed_filename,
-                            mime="video/mp4",
-                            use_container_width=True
+                # Show filter info if active
+                if filter_mode == "Detect Specific Objects Only" and selected_classes:
+                    st.info(f"🔍 Filtering for: {', '.join(selected_classes)}")
+                elif filter_mode == "Detect Specific Objects Only" and not selected_classes:
+                    st.warning("⚠️ Please select at least one object class to detect")
+
+                # Process button
+                if st.button("🚀 Start Detection", type="primary", use_container_width=True):
+                    with st.spinner("Processing video..."):
+                        # Prepare selected classes (None if detecting all)
+                        classes_to_detect = selected_classes if filter_mode == "Detect Specific Objects Only" else None
+
+                        output_path = process_video(
+                            st.session_state.temp_input_path,
+                            model,
+                            confidence_threshold,
+                            show_labels,
+                            show_fps,
+                            classes_to_detect
                         )
-            else:
-                st.info("Click 'Start Detection' to process the video")
+
+                        if output_path and os.path.exists(output_path):
+                            # Store the output path in session state (don't delete it yet)
+                            st.session_state.processed_video_path = output_path
+                            st.session_state.processed_filename = f"detected_{uploaded_file.name}"
+                            st.rerun()
+                        else:
+                            st.error("Failed to process video")
+                            st.session_state.processed_video_path = None
 
     else:
         # Show instructions
