@@ -12,6 +12,21 @@ from ultralytics import YOLO
 import time
 
 
+# COCO dataset classes
+COCO_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+    "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+]
+
+
 # Page configuration
 st.set_page_config(
     page_title="Object Detection App",
@@ -40,6 +55,24 @@ confidence_threshold = st.sidebar.slider(
 show_labels = st.sidebar.checkbox("Show Labels", value=True, help="Display class names and confidence scores")
 show_fps = st.sidebar.checkbox("Show FPS", value=True, help="Display processing speed")
 
+# Object class selection
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Object Filters")
+filter_mode = st.sidebar.radio(
+    "Filter Mode",
+    ["Detect All Objects", "Detect Specific Objects Only"],
+    help="Choose whether to detect all objects or only specific ones"
+)
+
+selected_classes = []
+if filter_mode == "Detect Specific Objects Only":
+    selected_classes = st.sidebar.multiselect(
+        "Select Objects to Detect",
+        options=COCO_CLASSES,
+        default=["person", "cell phone", "laptop"],
+        help="Only selected objects will be shown in the detected video"
+    )
+
 
 @st.cache_resource
 def load_model():
@@ -49,7 +82,7 @@ def load_model():
     return model
 
 
-def process_video(video_path, model, confidence, show_labels, show_fps):
+def process_video(video_path, model, confidence, show_labels, show_fps, selected_classes=None):
     """
     Process video file and return path to annotated video.
 
@@ -59,6 +92,7 @@ def process_video(video_path, model, confidence, show_labels, show_fps):
         confidence: Detection confidence threshold
         show_labels: Whether to show labels on detections
         show_fps: Whether to show FPS counter
+        selected_classes: List of class names to filter (None means show all)
 
     Returns:
         Path to processed video file
@@ -117,6 +151,11 @@ def process_video(video_path, model, confidence, show_labels, show_fps):
                     conf = float(box.conf[0])
                     class_name = model.names[cls_id]
 
+                    # Filter by selected classes if specified
+                    if selected_classes is not None and len(selected_classes) > 0:
+                        if class_name not in selected_classes:
+                            continue  # Skip this detection
+
                     # Get color for this class
                     color = colors[cls_id % len(colors)]
 
@@ -167,6 +206,12 @@ def process_video(video_path, model, confidence, show_labels, show_fps):
 
 # Main app
 def main():
+    # Initialize session state
+    if 'processed_video_path' not in st.session_state:
+        st.session_state.processed_video_path = None
+    if 'processed_filename' not in st.session_state:
+        st.session_state.processed_filename = None
+
     # Load model
     try:
         model = load_model()
@@ -183,6 +228,29 @@ def main():
     )
 
     if uploaded_file is not None:
+        # Reset processed video if a different file is uploaded
+        if 'current_file' not in st.session_state or st.session_state.current_file != uploaded_file.name:
+            # Clean up old processed video
+            if 'processed_video_path' in st.session_state and st.session_state.processed_video_path:
+                try:
+                    os.unlink(st.session_state.processed_video_path)
+                except:
+                    pass
+            st.session_state.processed_video_path = None
+            st.session_state.processed_filename = None
+            st.session_state.current_file = uploaded_file.name
+            # Clean up old temp input file if it exists
+            if 'temp_input_path' in st.session_state and st.session_state.temp_input_path:
+                try:
+                    os.unlink(st.session_state.temp_input_path)
+                except:
+                    pass
+            # Create new temp file for the uploaded video
+            temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            temp_input.write(uploaded_file.read())
+            temp_input.close()
+            st.session_state.temp_input_path = temp_input.name
+
         # Display video info
         file_details = {
             "Filename": uploaded_file.name,
@@ -192,13 +260,8 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("📹 Original Video")
-            # Save uploaded file temporarily
-            temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-            temp_input.write(uploaded_file.read())
-            temp_input.close()
-
-            # Display original video
-            st.video(temp_input.name)
+            # Display original video using stored path
+            st.video(st.session_state.temp_input_path)
 
             # Show file details
             for key, value in file_details.items():
@@ -207,61 +270,62 @@ def main():
         with col2:
             st.subheader("🎯 Detected Objects")
 
+            # Show filter info if active
+            if filter_mode == "Detect Specific Objects Only" and selected_classes:
+                st.info(f"🔍 Filtering for: {', '.join(selected_classes)}")
+            elif filter_mode == "Detect Specific Objects Only" and not selected_classes:
+                st.warning("⚠️ Please select at least one object class to detect")
+
             # Process button
             if st.button("🚀 Start Detection", type="primary", use_container_width=True):
                 with st.spinner("Processing video..."):
+                    # Prepare selected classes (None if detecting all)
+                    classes_to_detect = selected_classes if filter_mode == "Detect Specific Objects Only" else None
+
                     output_path = process_video(
-                        temp_input.name,
+                        st.session_state.temp_input_path,
                         model,
                         confidence_threshold,
                         show_labels,
-                        show_fps
+                        show_fps,
+                        classes_to_detect
                     )
 
                     if output_path and os.path.exists(output_path):
-                        # Display processed video
-                        st.video(output_path)
-
-                        # Download button
-                        with open(output_path, 'rb') as f:
-                            st.download_button(
-                                label="⬇️ Download Annotated Video",
-                                data=f.read(),
-                                file_name=f"detected_{uploaded_file.name}",
-                                mime="video/mp4",
-                                use_container_width=True
-                            )
-
-                        # Clean up
-                        os.unlink(output_path)
+                        # Store the output path in session state (don't delete it yet)
+                        st.session_state.processed_video_path = output_path
+                        st.session_state.processed_filename = f"detected_{uploaded_file.name}"
                     else:
                         st.error("Failed to process video")
+                        st.session_state.processed_video_path = None
 
-                # Clean up input file
-                os.unlink(temp_input.name)
+            # Display processed video if available
+            if 'processed_video_path' in st.session_state and st.session_state.processed_video_path:
+                if os.path.exists(st.session_state.processed_video_path):
+                    st.success("✅ Detection complete!")
+                    st.video(st.session_state.processed_video_path)
+
+                    # Download button
+                    with open(st.session_state.processed_video_path, 'rb') as f:
+                        st.download_button(
+                            label="⬇️ Download Annotated Video",
+                            data=f,
+                            file_name=st.session_state.processed_filename,
+                            mime="video/mp4",
+                            use_container_width=True
+                        )
+            else:
+                st.info("Click 'Start Detection' to process the video")
 
     else:
         # Show instructions
         st.info("👆 Upload a video file to get started")
 
         # Show COCO classes
-        with st.expander("📋 View Detectable Objects (COCO Classes)"):
-            coco_classes = [
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-                "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
-                "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
-                "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
-                "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
-                "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-                "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-                "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
-                "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
-                "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-            ]
-
+        with st.expander("📋 View All Detectable Objects (80 COCO Classes)"):
             # Display in columns
             cols = st.columns(4)
-            for idx, class_name in enumerate(coco_classes):
+            for idx, class_name in enumerate(COCO_CLASSES):
                 col_idx = idx % 4
                 cols[col_idx].write(f"• {class_name}")
 
@@ -276,6 +340,7 @@ This app uses YOLOv8x, a state-of-the-art object detection model pre-trained on 
 - Real-time object detection
 - Pre-trained on COCO dataset
 - Adjustable confidence threshold
+- Object class filtering
 - Video download support
 """)
 
