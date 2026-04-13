@@ -31,8 +31,22 @@ python src/pipeline.py --input path/to/video.mp4
 
 ### Run web interface
 ```bash
-uvicorn src.api:app --host 0.0.0.0 --port 8000
-# Open browser to http://localhost:8000
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+### Using Streamlit
+```bash
+streamlit run app.py
+```
+### Using FastAPI
+```bash
+uvicorn src.api:app --host [IP_ADDRESS] --port 8000
+```
+
+### Using Shell Script
+```bash
+./run.sh
 ```
 
 ### Train the model
