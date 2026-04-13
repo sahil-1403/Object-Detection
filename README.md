@@ -17,8 +17,6 @@ Runs fully locally — no cloud APIs, no paid services.
 ```bash
 git clone https://github.com/yourname/object-detector
 cd object-detector
-conda create -n objdet python=3.10
-conda activate objdet
 pip install -r requirements.txt
 ```
 
